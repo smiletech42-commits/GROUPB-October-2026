@@ -92,3 +92,100 @@ AND s.system_id = a.system_id
 AND s.data_classification IN ('Confidential', 'Restricted')
 AND e.department != s.owner_department
 AND a.access_result = 'Granted';
+
+
+MERCY DAMINABO
+ D. phishing and email security
+-- D1. how many emails fall into each category, and what share were phishing or malware? 
+
+create database INVESTIGATION;
+USE  INVESTIGATION;
+show tables;
+select * from employees;
+
+SELECT email_category, COUNT(*) AS email_count
+FROM email_security_events
+GROUP BY email_category
+ORDER BY email_count DESC;
+
+-- D2. What is the click rate on malicious emails, overall and by department? 
+-- i. OVERALL
+SELECT
+  COUNT(*) AS malicious_emails,
+  SUM(user_action IN ('Clicked Link', 'Opened Attachment')) AS clicked_or_opened,
+  ROUND(
+    100 * SUM(user_action IN ('Clicked Link', 'Opened Attachment')) / COUNT(*),
+    1
+  ) AS click_rate_pct
+FROM email_security_events
+WHERE email_category IN ('Phishing', 'Malware');
+
+-- ii. by DEPARTMENT
+SELECT
+  UPPER(TRIM(e.department)) AS department,
+  COUNT(*) AS malicious_emails,
+  SUM(s.user_action IN ('Clicked Link', 'Opened Attachment')) AS clicked_or_opened,
+  ROUND(
+    100 * SUM(s.user_action IN ('Clicked Link', 'Opened Attachment')) / COUNT(*),
+    1
+  ) AS click_rate_pct
+FROM email_security_events AS s
+JOIN employees AS e USING (employee_id)
+WHERE s.email_category IN ('Phishing', 'Malware')
+GROUP BY UPPER(TRIM(e.department))
+ORDER BY click_rate_pct DESC;
+
+-- D3. What is the report rate on malicious emails by department? Which departments respond best?
+
+SELECT
+  UPPER(TRIM(e.department)) AS department,
+  COUNT(*) AS malicious_emails,
+  SUM(s.user_action = 'Reported') AS reported,
+  ROUND(100 * SUM(s.user_action = 'Reported') / COUNT(*), 1) AS report_rate_pct
+FROM email_security_events AS s
+JOIN employees AS e USING (employee_id)
+WHERE s.email_category IN ('Phishing', 'Malware')
+GROUP BY UPPER(TRIM(e.department))
+ORDER BY report_rate_pct DESC;
+
+-- D4. Which employees interacted with malicious emails more than once?
+
+SELECT
+  e.employee_name,
+  TRIM(e.department) AS department,
+  COUNT(*) AS interactions
+FROM email_security_events AS s
+JOIN employees AS e USING (employee_id)
+WHERE s.email_category IN ('Phishing', 'Malware')
+  AND s.user_action IN ('Clicked Link', 'Opened Attachment')
+GROUP BY e.employee_id, e.employee_name, TRIM(e.department)
+HAVING COUNT(*) > 1
+ORDER BY interactions DESC;
+
+-- D5. Which sender domains and subject themes were most successful at getting employees to click?
+
+SELECT
+  sender_domain,
+  COUNT(*) AS malicious_emails,
+  SUM(user_action IN ('Clicked Link', 'Opened Attachment')) AS clicked_or_opened,
+  ROUND(
+    100 * SUM(user_action IN ('Clicked Link', 'Opened Attachment')) / COUNT(*),
+    1
+  ) AS click_rate_pct
+FROM email_security_events
+WHERE email_category IN ('Phishing', 'Malware')
+GROUP BY sender_domain
+ORDER BY click_rate_pct DESC;
+
+-- D6.How long did employees take to report malicious emails compared with how quickly others clicked them?
+
+SELECT
+  user_action,
+  COUNT(*) AS email_count,
+  ROUND(AVG(TIMESTAMPDIFF(MINUTE, received_timestamp, action_timestamp)), 1)
+    AS average_minutes
+FROM email_security_events
+WHERE email_category IN ('Phishing', 'Malware')
+  AND user_action IN ('Reported', 'Clicked Link', 'Opened Attachment')
+  AND action_timestamp IS NOT NULL
+GROUP BY user_action;
