@@ -1,0 +1,228 @@
+-- QUESTION F1--
+-- Rank employees within each department by the total number of records they downloaded or exported--
+
+SELECT
+    UPPER(TRIM(e.department)) AS department,
+    e.employee_id,
+    e.employee_name,
+    SUM(a.records_accessed) AS total_records_moved,
+    RANK() OVER (
+        PARTITION BY UPPER(TRIM(e.department))
+        ORDER BY SUM(a.records_accessed) DESC
+    ) AS rank_in_department
+FROM access_logs a
+JOIN employees e ON a.employee_id = e.employee_id
+WHERE a.action_type IN ('Download', 'Export')
+  AND a.records_accessed > 0
+GROUP BY UPPER(TRIM(e.department)), e.employee_id, e.employee_name
+ORDER BY department, rank_in_department;
+
+
+-- QUESTION F2--
+-- Calculate weekly access volume and records moved, with week-over-week change--
+WITH weekly AS (
+    SELECT
+        DATE_SUB(
+            DATE(STR_TO_DATE(access_timestamp, '%d-%m-%y %H:%i')),
+            INTERVAL WEEKDAY(STR_TO_DATE(access_timestamp, '%d-%m-%y %H:%i')) DAY
+        ) AS week_start,
+        COUNT(*) AS access_events,
+        SUM(CASE
+                WHEN action_type IN ('Download', 'Export')
+                 AND records_accessed > 0
+                THEN records_accessed
+                ELSE 0
+            END) AS records_moved
+    FROM access_logs
+    GROUP BY week_start
+)
+SELECT
+    week_start,
+    access_events,
+    LAG(access_events) OVER (ORDER BY week_start) AS previous_week_events,
+    access_events - LAG(access_events) OVER (ORDER BY week_start) AS event_change,
+    records_moved,
+    LAG(records_moved) OVER (ORDER BY week_start) AS previous_week_records,
+    records_moved - LAG(records_moved) OVER (ORDER BY week_start) AS records_change
+FROM weekly
+ORDER BY week_start;
+
+
+-- QUESTION F3--
+-- Produce a running total of records exported across the month. On which days did the total rise sharply?--
+WITH daily AS (
+    SELECT 
+        DATE(STR_TO_DATE(access_timestamp, '%d-%m-%y %H:%i')) AS day,
+        SUM(records_accessed) AS records_exported
+    FROM access_logs
+    WHERE action_type = 'Export'
+      AND records_accessed > 0
+    GROUP BY DATE(STR_TO_DATE(access_timestamp, '%d-%m-%y %H:%i'))
+)
+SELECT 
+    day,
+    records_exported,
+    SUM(records_exported) OVER (ORDER BY day) AS running_total
+FROM daily
+ORDER BY day;
+
+
+-- QUESTION F4--
+-- Compare each department's phishing click rate with the company-wide click rate.--
+
+WITH dept AS (
+    SELECT 
+        UPPER(TRIM(e.department)) AS department,
+        COUNT(*) AS malicious_emails,
+        SUM(CASE WHEN s.user_action IN ('Clicked Link', 'Opened Attachment') 
+                 THEN 1 ELSE 0 END) AS clicks
+    FROM email_security_events s
+    JOIN employees e ON s.employee_id = e.employee_id
+    WHERE s.email_category IN ('Phishing', 'Malware')
+    GROUP BY UPPER(TRIM(e.department))
+)
+SELECT 
+    department,
+    malicious_emails,
+    clicks,
+    ROUND(100 * clicks / malicious_emails, 1) AS dept_click_rate_pct,
+    ROUND(100 * SUM(clicks) OVER () / SUM(malicious_emails) OVER (), 1) AS company_click_rate_pct,
+    ROUND(100 * clicks / malicious_emails
+          - 100 * SUM(clicks) OVER () / SUM(malicious_emails) OVER (), 1) AS points_above_company
+FROM dept
+ORDER BY dept_click_rate_pct DESC;
+
+
+-- QUESTION F5--
+-- Build an employee risk score that combines at least three indicators from different tables. Explain and justify your weights--
+
+WITH large_moves AS (
+    SELECT employee_id, COUNT(*) AS large_move_cnt
+    FROM access_logs
+    WHERE action_type IN ('Download', 'Export')
+      AND records_accessed > 500
+    GROUP BY employee_id
+),
+phish_clicks AS (
+    SELECT employee_id, COUNT(*) AS phish_click_cnt
+    FROM email_security_events
+    WHERE email_category IN ('Phishing', 'Malware')
+      AND user_action IN ('Clicked Link', 'Opened Attachment')
+    GROUP BY employee_id
+),
+post_term AS (
+    SELECT a.employee_id, COUNT(*) AS post_term_cnt
+    FROM access_logs a
+    JOIN employees e ON a.employee_id = e.employee_id
+    WHERE e.employment_status = 'Terminated'
+      AND e.termination_date IS NOT NULL
+      AND STR_TO_DATE(a.access_timestamp, '%d-%m-%y %H:%i') > STR_TO_DATE(e.termination_date, '%d-%m-%y')
+    GROUP BY a.employee_id
+),
+inc_cnt AS (
+    SELECT employee_id, COUNT(*) AS incident_cnt
+    FROM incidents
+    GROUP BY employee_id
+),
+above_granted AS (
+    SELECT a.employee_id, COUNT(*) AS above_granted_cnt
+    FROM access_logs a
+    JOIN employees e ON a.employee_id = e.employee_id
+    JOIN systems s ON a.system_id = s.system_id
+    WHERE a.access_result = 'Granted'
+      AND e.clearance_level IS NOT NULL
+      AND CASE s.data_classification
+            WHEN 'Public' THEN 1
+            WHEN 'Internal' THEN 2
+            WHEN 'Confidential' THEN 3
+            WHEN 'Restricted' THEN 4
+          END > e.clearance_level
+    GROUP BY a.employee_id
+)
+SELECT 
+    e.employee_id,
+    e.employee_name,
+    e.department,
+    COALESCE(ag.above_granted_cnt, 0) AS above_granted,
+    COALESCE(lm.large_move_cnt, 0) AS large_moves,
+    COALESCE(pc.phish_click_cnt, 0) AS phish_clicks,
+    COALESCE(pt.post_term_cnt, 0) AS post_term_activity,
+    COALESCE(ic.incident_cnt, 0) AS incidents,
+    (COALESCE(ag.above_granted_cnt, 0) * 3) +
+    (COALESCE(lm.large_move_cnt, 0) * 4) +
+    (COALESCE(pc.phish_click_cnt, 0) * 2) +
+    (COALESCE(pt.post_term_cnt, 0) * 10) +
+    (COALESCE(ic.incident_cnt, 0) * 3) AS risk_score
+FROM employees e
+LEFT JOIN above_granted ag ON e.employee_id = ag.employee_id
+LEFT JOIN large_moves lm ON e.employee_id = lm.employee_id
+LEFT JOIN phish_clicks pc ON e.employee_id = pc.employee_id
+LEFT JOIN post_term pt ON e.employee_id = pt.employee_id
+LEFT JOIN inc_cnt ic ON e.employee_id = ic.employee_id
+ORDER BY risk_score DESC;
+
+
+-- QUESTION F6--
+/* Create a reusable view (for example, vw_employee_security_summary) that management could query
+regularly. A stored procedure that returns one employee's activity is optional extra credit.*/
+
+CREATE OR REPLACE VIEW vw_employee_security_summary AS
+SELECT 
+    e.employee_id,
+    e.employee_name,
+    e.department,
+    e.job_role,
+    e.clearance_level,
+    e.employment_status,
+    e.termination_date,
+    COUNT(a.access_id) AS total_access_events,
+    SUM(CASE WHEN a.access_result = 'Denied' THEN 1 ELSE 0 END) AS denied_accesses,
+    SUM(CASE 
+            WHEN a.action_type IN ('Download', 'Export') AND a.records_accessed > 0 
+            THEN a.records_accessed 
+            ELSE 0 
+        END) AS total_records_moved,
+    SUM(CASE 
+            WHEN a.action_type IN ('Download', 'Export') AND a.records_accessed > 500 
+            THEN 1 ELSE 0 
+        END) AS large_transfers,
+    (SELECT COUNT(*) 
+     FROM email_security_events em 
+     WHERE em.employee_id = e.employee_id 
+       AND em.email_category IN ('Phishing', 'Malware')
+       AND em.user_action IN ('Clicked Link', 'Opened Attachment')) AS malicious_clicks,
+    (SELECT COUNT(*) 
+     FROM incidents i 
+     WHERE i.employee_id = e.employee_id) AS incident_count
+FROM employees e
+LEFT JOIN access_logs a ON e.employee_id = a.employee_id
+GROUP BY 
+    e.employee_id, e.employee_name, e.department, e.job_role,
+    e.clearance_level, e.employment_status, e.termination_date;
+
+
+-- QUESTION F7 --
+/*Based on all your findings, which three employees, systems or processes should be reviewed first, and why?*/
+
+-- 1. Employee: Patrick Ude (Employee ID 1019)
+-- Why? He was terminated on 14 August 2026.
+-- After his termination, he still accessed the Customer Database 6 times from Remote locations.
+-- He downloaded and exported large amounts of data (up to 1,200 records).
+-- This is a critical security failure (terminated account still active).
+-- Action needed: Immediately disable his account and investigate what data he took.
+
+-- 2. Employee: Victor Eze (Employee ID 1008)
+-- Why? He moved the highest volume of data in the entire month (over 18,000 records).
+-- He made multiple extremely large exports from the Customer Database (1,850 to 4,750 records).
+-- Many of these exports happened late at night or from VPN/Remote.
+-- There is already a Critical open incident for “Bulk Data Export”.
+-- Action needed: Review all his large exports and restrict his ability to export large volumes.
+
+-- 3. Process/System: Customer Database + Account Termination Process
+-- Why? The Customer Database was the main system targeted by both Patrick Ude and Victor Eze.
+-- The company failed to remove Patrick Ude’s access after he was terminated.
+-- This shows two serious weaknesses:
+--    - Weak control over bulk data exports
+--    - Failed leaver (termination) process
+-- Action needed: Strengthen export controls on the Customer Database.  
+-- Fix the account termination process so access is removed immediately when someone leaves.
